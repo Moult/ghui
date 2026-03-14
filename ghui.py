@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""yolo - Browse GitHub issues and PRs in your terminal."""
+"""ghui - Browse GitHub issues and PRs in your terminal."""
 
 import argparse
 import curses
@@ -25,7 +25,7 @@ except ImportError:
 
 # --- Cache ---
 
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "yolo"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ghui"
 
 
 def _cache_key(parts: list[str]) -> Path:
@@ -597,7 +597,7 @@ def draw_title_bar(stdscr, state, repo):
     count = len(state.items)
     fetched = format_fetch_time(state.fetched_at)
     page_str = f" p{state.page}" if state.page > 1 else ""
-    title = f" yolo - {repo}"
+    title = f" ghui - {repo}"
     right = f" {tab} | {state.state_filter} | {count}{page_str} | fetched {fetched} "
     pad = max(0, w - len(title) - len(right))
     bar = title + " " * pad + right
@@ -892,7 +892,7 @@ def start_comment(stdscr, state):
     if state.draft_tmppath and os.path.exists(state.draft_tmppath):
         tmppath = state.draft_tmppath
     else:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, prefix="yolo_comment_") as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False, prefix="ghui_comment_") as f:
             f.write(f"\n# Comment for {kind} #{num}\n# Lines starting with # are ignored.\n# Save and close to preview draft.\n")
             tmppath = f.name
         state.draft_tmppath = tmppath
@@ -1242,7 +1242,7 @@ def main_loop(stdscr, repo):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="yolo - Browse GitHub issues and PRs in your terminal")
+    parser = argparse.ArgumentParser(description="ghui - Browse GitHub issues and PRs in your terminal")
     parser.add_argument("repo", nargs="?", help="owner/repo (auto-detected from git remote if omitted)")
     args = parser.parse_args()
 
