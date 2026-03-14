@@ -105,6 +105,10 @@ class GH:
     def comment(self, kind, number, body_file):
         self._run(kind, "comment", str(number), "--body-file", body_file)
 
+    def merge_pr(self, number, method="merge"):
+        flag = {"merge": "--merge", "rebase": "--rebase", "squash": "--squash"}[method]
+        self._run("pr", "merge", str(number), flag, "--delete-branch")
+
     def close(self, kind, number):
         self._run(kind, "close", str(number))
 
@@ -722,7 +726,7 @@ def draw_detail_view(stdscr, state, repo):
     elif state.viewing_diff:
         ht = " j/k:scroll  v:back to detail  B:browser  q:back"
     elif state.kind == "pr":
-        ht = " j/k:scroll  c:comment  v:diff  O:reopen  C:close  B:browser  r:refresh  q:back"
+        ht = " j/k:scroll  c:comment  v:diff  m:merge  O:reopen  C:close  B:browser  r:refresh  q:back"
     else:
         ht = " j/k:scroll  c:comment  O:reopen  C:close  B:browser  r:refresh  q:back"
     safe_addstr(stdscr, h - 1, 0, ht.ljust(w)[:w], curses.color_pair(C_HELP))
@@ -1129,6 +1133,25 @@ def main_loop(stdscr, repo):
                     stdscr = start_comment(stdscr, state)
                 elif key == ord("v") and state.kind == "pr" and state.detail_item:
                     fetch_diff(gh, state, state.detail_item.get("number"), w)
+                elif key == ord("m") and state.kind == "pr" and state.detail_item:
+                    state.status_msg = "Merge method: (M)erge  (R)ebase  (S)quash  (Esc)cancel"
+                    draw_detail_view(stdscr, state, repo)
+                    mk = stdscr.getch()
+                    methods = {ord("m"): "merge", ord("M"): "merge",
+                               ord("r"): "rebase", ord("R"): "rebase",
+                               ord("s"): "squash", ord("S"): "squash"}
+                    if mk in methods:
+                        num = state.detail_item.get("number")
+                        try:
+                            gh.merge_pr(num, methods[mk])
+                            state.detail_item["state"] = "MERGED"
+                            state.detail_lines = []
+                            state.status_msg = f"Merged #{num} ({methods[mk]})"
+                            save_cache(cache_path_detail(gh.repo, state.kind, num), state.detail_item)
+                        except RuntimeError as e:
+                            state.status_msg = f"Merge failed: {e}"[:80]
+                    else:
+                        state.status_msg = ""
                 elif key == ord("O"):
                     if state.detail_item:
                         num = state.detail_item.get("number")
