@@ -77,14 +77,14 @@ class GH:
     def _json(self, *args):
         return json.loads(self._run(*args))
 
-    def list_issues(self, state="open", search="", limit=100):
+    def list_issues(self, state="open", search="", limit=500):
         cmd = ["issue", "list", "--json", "number,title,author,labels,state,updatedAt,createdAt,comments",
                "--state", state, "-L", str(limit)]
         if search:
             cmd += ["--search", search]
         return self._json(*cmd)
 
-    def list_prs(self, state="open", search="", limit=100):
+    def list_prs(self, state="open", search="", limit=500):
         cmd = ["pr", "list", "--json", "number,title,author,labels,state,updatedAt,createdAt,comments,isDraft,reviewDecision",
                "--state", state, "-L", str(limit)]
         if search:
@@ -745,11 +745,23 @@ def fetch_list(gh, state, force=False):
             state.cursor = state.scroll_offset = 0
             state.status_msg = ""
             return
+    # Remember old updatedAt per item to detect stale detail caches
+    old_updated = {it.get("number"): it.get("updatedAt") for it in state.items}
+
     state.loading = True
     try:
         items = gh.list_issues(state=state.state_filter, search=state.search_query) if state.kind == "issue" \
             else gh.list_prs(state=state.state_filter, search=state.search_query)
         save_cache(cp, items)
+
+        # Purge detail/diff caches for items whose updatedAt changed
+        for it in items:
+            num = it.get("number")
+            if num in old_updated and old_updated[num] != it.get("updatedAt"):
+                for p in (cache_path_detail(gh.repo, state.kind, num), cache_path_diff(gh.repo, num)):
+                    if p.exists():
+                        p.unlink()
+
         state.items = sort_items(items, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
         state.fetched_at = datetime.now(timezone.utc).isoformat()
         state.cursor = state.scroll_offset = 0
