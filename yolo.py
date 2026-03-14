@@ -591,7 +591,7 @@ def draw_list_view(stdscr, state, repo):
     if not state.items:
         safe_addstr(stdscr, h // 2, w // 2 - 7, "No items found", curses.A_DIM)
 
-    list_h = max(1, h - 4)
+    list_h = max(1, h - 5)
 
     if state.cursor < state.scroll_offset:
         state.scroll_offset = state.cursor
@@ -647,7 +647,7 @@ def draw_list_view(stdscr, state, repo):
         cc = comment_count(item)
         safe_addstr(stdscr, row, w - cmts_col - 1, (f"{cc}c" if cc else "").rjust(cmts_col - 1), attr | curses.A_DIM)
 
-    # Overlays
+    # Status / overlays (h-3), blank spacer (h-2), help bar (h-1)
     if state.mode == "search":
         safe_addstr(stdscr, h - 2, 0, f" /{state.search_buf}█".ljust(w)[:w], curses.A_BOLD)
     elif state.mode == "goto":
@@ -661,7 +661,7 @@ def draw_list_view(stdscr, state, repo):
         "goto": " Enter:go  Esc:cancel",
     }
     help_text = helps.get(state.mode,
-        " j/k:move  o/Enter:view  B:browser  #:goto  i/p:issues/PRs  /:search  f:filter  s:sort  S:reverse  r:refresh  q:quit")
+        " j/k:move  J/K:5x  o/Enter:view  B:browser  #:goto  i/p:issues/PRs  /:search  f:filter  s:sort  S:reverse  r:refresh  q:quit")
     safe_addstr(stdscr, h - 1, 0, help_text.ljust(w)[:w], curses.color_pair(C_HELP))
     stdscr.refresh()
 
@@ -699,9 +699,9 @@ def draw_detail_view(stdscr, state, repo):
         safe_addstr(stdscr, 1, 0, f" DRAFT: {preview}   y:post  e:edit  n:discard ".ljust(w)[:w],
                     curses.color_pair(C_DRAFT) | curses.A_BOLD)
 
-    # Content
+    # Content (leave 2 rows at bottom: status + help)
     content_start = 1 + banner_h
-    content_h = max(1, h - content_start - 1)
+    content_h = max(1, h - content_start - 2)
     max_scroll = max(0, len(active_lines) - content_h)
     state.detail_scroll = max(0, min(state.detail_scroll, max_scroll))
 
@@ -928,12 +928,20 @@ def _reinit_curses(stdscr):
 # --- Main loop ---
 
 def _detail_scroll_keys(key, state, h, banner_h=0):
-    """Handle j/k/g/G/space scrolling. Returns True if handled."""
-    content_h = max(1, h - 1 - banner_h - 1)
+    """Handle j/k/J/K/g/G/space/pgup/pgdn scrolling. Returns True if handled."""
+    content_h = max(1, h - 2 - banner_h - 1)
     if key in (ord("j"), curses.KEY_DOWN):
         state.detail_scroll += 1
     elif key in (ord("k"), curses.KEY_UP):
         state.detail_scroll -= 1
+    elif key == ord("J"):
+        state.detail_scroll += 5
+    elif key == ord("K"):
+        state.detail_scroll -= 5
+    elif key in (curses.KEY_NPAGE,):
+        state.detail_scroll += content_h
+    elif key in (curses.KEY_PPAGE,):
+        state.detail_scroll -= content_h
     elif key in (ord("g"), curses.KEY_HOME):
         state.detail_scroll = 0
     elif key in (ord("G"), curses.KEY_END):
@@ -1023,6 +1031,16 @@ def main_loop(stdscr, repo):
             elif key in (ord("k"), curses.KEY_UP):
                 if state.cursor > 0:
                     state.cursor -= 1
+            elif key == ord("J"):
+                state.cursor = min(len(state.items) - 1, state.cursor + 5)
+            elif key == ord("K"):
+                state.cursor = max(0, state.cursor - 5)
+            elif key == curses.KEY_NPAGE:
+                list_h = max(1, h - 5)
+                state.cursor = min(len(state.items) - 1, state.cursor + list_h)
+            elif key == curses.KEY_PPAGE:
+                list_h = max(1, h - 5)
+                state.cursor = max(0, state.cursor - list_h)
             elif key in (ord("g"), curses.KEY_HOME):
                 state.cursor = 0
             elif key in (ord("G"), curses.KEY_END):
