@@ -35,8 +35,8 @@ def _cache_key(parts: list[str]) -> Path:
     return CACHE_DIR / f"{safe}_{h}.json"
 
 
-def cache_path_list(repo, kind, state_filter, search):
-    return _cache_key([repo, kind, state_filter, search])
+def cache_path_list(repo, kind, state_filter, search, page=1):
+    return _cache_key([repo, kind, state_filter, search, str(page)])
 
 
 def cache_path_detail(repo, kind, number):
@@ -77,19 +77,49 @@ class GH:
     def _json(self, *args):
         return json.loads(self._run(*args))
 
-    def list_issues(self, state="open", search="", limit=500):
-        cmd = ["issue", "list", "--json", "number,title,author,labels,state,updatedAt,createdAt,comments",
-               "--state", state, "-L", str(limit)]
-        if search:
-            cmd += ["--search", search]
-        return self._json(*cmd)
+    def _api_get(self, endpoint):
+        r = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(r.stderr.strip())
+        return json.loads(r.stdout)
 
-    def list_prs(self, state="open", search="", limit=500):
-        cmd = ["pr", "list", "--json", "number,title,author,labels,state,updatedAt,createdAt,comments,isDraft,reviewDecision",
-               "--state", state, "-L", str(limit)]
+    @staticmethod
+    def _normalize_item(item):
+        return {
+            "number": item["number"],
+            "title": item.get("title", ""),
+            "author": item.get("user") or {},
+            "labels": item.get("labels", []),
+            "state": item.get("state", "").upper(),
+            "updatedAt": item.get("updated_at", ""),
+            "createdAt": item.get("created_at", ""),
+            "comments": item.get("comments", 0),
+            "isDraft": item.get("draft", False),
+            "reviewDecision": "",
+        }
+
+    def _search(self, query, page=1, per_page=100):
+        from urllib.parse import quote
+        q = quote(f"repo:{self.repo} {query}")
+        data = self._api_get(f"search/issues?q={q}&sort=updated&order=desc&per_page={per_page}&page={page}")
+        items = [self._normalize_item(it) for it in data.get("items", [])]
+        total = data.get("total_count", 0)
+        return items, total
+
+    def list_issues(self, state="open", search="", page=1, per_page=100):
+        q = f"is:issue state:{state}"
         if search:
-            cmd += ["--search", search]
-        return self._json(*cmd)
+            q += f" {search}"
+        return self._search(q, page, per_page)
+
+    def list_prs(self, state="open", search="", page=1, per_page=100):
+        if state == "merged":
+            q = "is:pr is:merged"
+        else:
+            q = f"is:pr state:{state}"
+        if search:
+            q += f" {search}"
+        return self._search(q, page, per_page)
 
     def view_issue(self, number):
         return self._json("issue", "view", str(number), "--json",
@@ -151,6 +181,8 @@ class AppState:
     fetched_at: str = ""
     draft_body: str = ""
     draft_tmppath: str = ""
+    page: int = 1
+    has_next_page: bool = False
     viewing_diff: bool = False
     diff_lines: list = field(default_factory=list)
 
@@ -564,8 +596,9 @@ def draw_title_bar(stdscr, state, repo):
     tab = "Issues" if state.kind == "issue" else "PRs"
     count = len(state.items)
     fetched = format_fetch_time(state.fetched_at)
+    page_str = f" p{state.page}" if state.page > 1 else ""
     title = f" yolo - {repo}"
-    right = f" {tab} | {state.state_filter} | {count} | fetched {fetched} "
+    right = f" {tab} | {state.state_filter} | {count}{page_str} | fetched {fetched} "
     pad = max(0, w - len(title) - len(right))
     bar = title + " " * pad + right
     safe_addstr(stdscr, 0, 0, bar.ljust(w)[:w], curses.color_pair(C_TITLE) | curses.A_BOLD)
@@ -665,7 +698,7 @@ def draw_list_view(stdscr, state, repo):
         "goto": " Enter:go  Esc:cancel",
     }
     help_text = helps.get(state.mode,
-        " j/k:move  J/K:5x  o/Enter:view  B:browser  #:goto  i/p:issues/PRs  /:search  f:filter  s:sort  S:reverse  r:refresh  q:quit")
+        " j/k:move  J/K:5x  o/Enter:view  B:browser  #:goto  n/N:page  i/p:issues/PRs  /:search  f:filter  s:sort  r:refresh  q:quit")
     safe_addstr(stdscr, h - 1, 0, help_text.ljust(w)[:w], curses.color_pair(C_HELP))
     stdscr.refresh()
 
@@ -740,11 +773,15 @@ def draw_detail_view(stdscr, state, repo):
 # --- Data operations ---
 
 def fetch_list(gh, state, force=False):
-    cp = cache_path_list(gh.repo, state.kind, state.state_filter, state.search_query)
+    PER_PAGE = 100
+    cp = cache_path_list(gh.repo, state.kind, state.state_filter, state.search_query, state.page)
     if not force:
         data, fetched_at = load_cache(cp)
         if data is not None:
-            state.items = sort_items(data, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
+            items = data.get("items", data) if isinstance(data, dict) else data
+            total = data.get("total", 0) if isinstance(data, dict) else len(items)
+            state.items = sort_items(items, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
+            state.has_next_page = state.page * PER_PAGE < total
             state.fetched_at = fetched_at
             state.cursor = state.scroll_offset = 0
             state.status_msg = ""
@@ -754,9 +791,11 @@ def fetch_list(gh, state, force=False):
 
     state.loading = True
     try:
-        items = gh.list_issues(state=state.state_filter, search=state.search_query) if state.kind == "issue" \
-            else gh.list_prs(state=state.state_filter, search=state.search_query)
-        save_cache(cp, items)
+        items, total = gh.list_issues(state=state.state_filter, search=state.search_query, page=state.page, per_page=PER_PAGE) \
+            if state.kind == "issue" \
+            else gh.list_prs(state=state.state_filter, search=state.search_query, page=state.page, per_page=PER_PAGE)
+        state.has_next_page = state.page * PER_PAGE < total
+        save_cache(cp, {"items": items, "total": total})
 
         # Purge detail/diff caches for items whose updatedAt changed
         for it in items:
@@ -1011,6 +1050,7 @@ def main_loop(stdscr, repo):
                 state.search_query = state.search_buf
                 state.search_buf = ""
                 state.mode = "list"
+                state.page = 1
                 fetch_list(gh, state)
                 if not state.items and not state.fetched_at:
                     fetch_list(gh, state, force=True)
@@ -1071,11 +1111,13 @@ def main_loop(stdscr, repo):
                 if state.kind != "issue":
                     state.kind = "issue"
                     state.state_filter = "open"
+                    state.page = 1
                     fetch_list(gh, state)
             elif key == ord("p"):
                 if state.kind != "pr":
                     state.kind = "pr"
                     state.state_filter = "open"
+                    state.page = 1
                     fetch_list(gh, state)
             elif key == ord("/"):
                 state.mode = "search"
@@ -1087,6 +1129,7 @@ def main_loop(stdscr, repo):
                 cycle = ["open", "closed", "merged", "all"] if state.kind == "pr" else ["open", "closed", "all"]
                 idx = cycle.index(state.state_filter) if state.state_filter in cycle else 0
                 state.state_filter = cycle[(idx + 1) % len(cycle)]
+                state.page = 1
                 fetch_list(gh, state)
             elif key == ord("s"):
                 state.sort_idx = (state.sort_idx + 1) % len(SORT_KEYS)
@@ -1094,6 +1137,18 @@ def main_loop(stdscr, repo):
                 state.sort_reverse = not state.sort_reverse
             elif key == ord("r"):
                 fetch_list(gh, state, force=True)
+            elif key == ord("n"):
+                if state.has_next_page:
+                    state.page += 1
+                    fetch_list(gh, state)
+                    if not state.items:
+                        state.page -= 1
+                        fetch_list(gh, state)
+                        state.status_msg = "No more pages"
+            elif key == ord("N"):
+                if state.page > 1:
+                    state.page -= 1
+                    fetch_list(gh, state)
 
         # --- Detail ---
         elif state.mode == "detail":
