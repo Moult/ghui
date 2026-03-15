@@ -1126,7 +1126,7 @@ def main_loop(stdscr, repo):
                 state.mode = "goto"
                 state.goto_buf = ""
             elif key == ord("f"):
-                cycle = ["open", "closed", "merged", "all"] if state.kind == "pr" else ["open", "closed", "all"]
+                cycle = ["open", "closed", "merged"] if state.kind == "pr" else ["open", "closed"]
                 idx = cycle.index(state.state_filter) if state.state_filter in cycle else 0
                 state.state_filter = cycle[(idx + 1) % len(cycle)]
                 state.page = 1
