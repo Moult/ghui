@@ -127,7 +127,7 @@ class GH:
 
     def view_pr(self, number):
         return self._json("pr", "view", str(number), "--json",
-                          "number,title,body,author,labels,state,comments,createdAt,updatedAt,url,isDraft,reviewDecision,additions,deletions,changedFiles")
+                          "number,title,body,author,labels,state,comments,createdAt,updatedAt,url,isDraft,reviewDecision,additions,deletions,changedFiles,commits")
 
     def pr_diff(self, number):
         return self._run("pr", "diff", str(number))
@@ -343,6 +343,8 @@ def init_colors():
 def state_indicator(item):
     s = item.get("state", "").upper()
     if s == "OPEN":
+        if item.get("isDraft"):
+            return "◌", C_DATE
         return "●", C_OPEN
     elif s == "MERGED":
         return "◆", C_MERGED
@@ -487,7 +489,8 @@ def build_detail_lines(item, width, kind):
         files = item.get("changedFiles", 0)
         meta_segs += [("  ", 0), (f"+{adds}", curses.color_pair(C_DIFF_ADD)),
                       (f"/-{dels}", curses.color_pair(C_DIFF_DEL)),
-                      (f" ({files} files)", curses.color_pair(C_DATE))]
+                      (f" ({files} files)", curses.color_pair(C_DATE)),
+                      (f" {len(item.get('commits', []))} commits", curses.color_pair(C_DATE))]
         if item.get("isDraft"):
             meta_segs += [(" ", 0), ("DRAFT", curses.color_pair(C_LABEL) | curses.A_BOLD)]
         rd = item.get("reviewDecision", "")
