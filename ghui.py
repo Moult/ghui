@@ -35,8 +35,8 @@ def _cache_key(parts: list[str]) -> Path:
     return CACHE_DIR / f"{safe}_{h}.json"
 
 
-def cache_path_list(repo, kind, state_filter, search, page=1):
-    return _cache_key([repo, kind, state_filter, search, str(page)])
+def cache_path_list(repo, kind, state_filter, search, sort="updated", order="desc", page=1):
+    return _cache_key([repo, kind, state_filter, search, sort, order, str(page)])
 
 
 def cache_path_detail(repo, kind, number):
@@ -98,28 +98,28 @@ class GH:
             "reviewDecision": "",
         }
 
-    def _search(self, query, page=1, per_page=100):
+    def _search(self, query, sort="updated", order="desc", page=1, per_page=100):
         from urllib.parse import quote
         q = quote(f"repo:{self.repo} {query}")
-        data = self._api_get(f"search/issues?q={q}&sort=updated&order=desc&per_page={per_page}&page={page}")
+        data = self._api_get(f"search/issues?q={q}&sort={sort}&order={order}&per_page={per_page}&page={page}")
         items = [self._normalize_item(it) for it in data.get("items", [])]
         total = data.get("total_count", 0)
         return items, total
 
-    def list_issues(self, state="open", search="", page=1, per_page=100):
+    def list_issues(self, state="open", search="", sort="updated", order="desc", page=1, per_page=100):
         q = f"is:issue state:{state}"
         if search:
             q += f" {search}"
-        return self._search(q, page, per_page)
+        return self._search(q, sort=sort, order=order, page=page, per_page=per_page)
 
-    def list_prs(self, state="open", search="", page=1, per_page=100):
+    def list_prs(self, state="open", search="", sort="updated", order="desc", page=1, per_page=100):
         if state == "merged":
             q = "is:pr is:merged"
         else:
             q = f"is:pr state:{state}"
         if search:
             q += f" {search}"
-        return self._search(q, page, per_page)
+        return self._search(q, sort=sort, order=order, page=page, per_page=per_page)
 
     def view_issue(self, number):
         return self._json("issue", "view", str(number), "--json",
@@ -220,10 +220,7 @@ def comment_count(item):
     return len(c) if isinstance(c, list) else (int(c) if c else 0)
 
 
-def sort_items(items, sort_key, reverse):
-    if sort_key == "comments":
-        return sorted(items, key=lambda x: comment_count(x), reverse=reverse)
-    return sorted(items, key=lambda x: x.get(sort_key, ""), reverse=reverse)
+
 
 
 def author_login(item):
@@ -777,13 +774,15 @@ def draw_detail_view(stdscr, state, repo):
 
 def fetch_list(gh, state, force=False):
     PER_PAGE = 100
-    cp = cache_path_list(gh.repo, state.kind, state.state_filter, state.search_query, state.page)
+    sort_api = SORT_KEYS[state.sort_idx][1]
+    order_api = "desc" if state.sort_reverse else "asc"
+    cp = cache_path_list(gh.repo, state.kind, state.state_filter, state.search_query, sort=sort_api, order=order_api, page=state.page)
     if not force:
         data, fetched_at = load_cache(cp)
         if data is not None:
             items = data.get("items", data) if isinstance(data, dict) else data
             total = data.get("total", 0) if isinstance(data, dict) else len(items)
-            state.items = sort_items(items, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
+            state.items = items
             state.has_next_page = state.page * PER_PAGE < total
             state.fetched_at = fetched_at
             state.cursor = state.scroll_offset = 0
@@ -794,9 +793,9 @@ def fetch_list(gh, state, force=False):
 
     state.loading = True
     try:
-        items, total = gh.list_issues(state=state.state_filter, search=state.search_query, page=state.page, per_page=PER_PAGE) \
+        items, total = gh.list_issues(state=state.state_filter, search=state.search_query, sort=sort_api, order=order_api, page=state.page, per_page=PER_PAGE) \
             if state.kind == "issue" \
-            else gh.list_prs(state=state.state_filter, search=state.search_query, page=state.page, per_page=PER_PAGE)
+            else gh.list_prs(state=state.state_filter, search=state.search_query, sort=sort_api, order=order_api, page=state.page, per_page=PER_PAGE)
         state.has_next_page = state.page * PER_PAGE < total
         save_cache(cp, {"items": items, "total": total})
 
@@ -808,7 +807,7 @@ def fetch_list(gh, state, force=False):
                     if p.exists():
                         p.unlink()
 
-        state.items = sort_items(items, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
+        state.items = items
         state.fetched_at = datetime.now(timezone.utc).isoformat()
         state.cursor = state.scroll_offset = 0
         state.status_msg = "Refreshed"
@@ -1028,7 +1027,6 @@ def main_loop(stdscr, repo):
         h, w = stdscr.getmaxyx()
 
         if state.mode in ("list", "search", "goto"):
-            state.items = sort_items(state.items, SORT_KEYS[state.sort_idx][0], state.sort_reverse)
             draw_list_view(stdscr, state, repo)
         elif state.mode == "detail":
             if not state.detail_lines and state.detail_item:
@@ -1136,8 +1134,12 @@ def main_loop(stdscr, repo):
                 fetch_list(gh, state)
             elif key == ord("s"):
                 state.sort_idx = (state.sort_idx + 1) % len(SORT_KEYS)
+                state.page = 1
+                fetch_list(gh, state)
             elif key == ord("S"):
                 state.sort_reverse = not state.sort_reverse
+                state.page = 1
+                fetch_list(gh, state)
             elif key == ord("r"):
                 fetch_list(gh, state, force=True)
             elif key == ord("n"):
