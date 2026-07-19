@@ -67,8 +67,9 @@ python3 ghui.py facebook/react      # any public repo
 | `O` | Reopen |
 | `C` | Close |
 | `B` | Open in browser |
+| `#` | Jump to issue/PR number |
 | `r` | Refresh |
-| `q` | Back |
+| `q` | Back (returns to the pre-jump view after `#`) |
 
 ## License
 

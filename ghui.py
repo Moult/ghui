@@ -162,7 +162,7 @@ SORT_KEYS = [("updatedAt", "updated"), ("createdAt", "created"), ("comments", "c
 
 @dataclass
 class AppState:
-    mode: str = "list"  # list, detail, search, goto
+    mode: str = "list"  # list, detail, search, goto, goto_detail
     kind: str = "issue"
     items: list = field(default_factory=list)
     cursor: int = 0
@@ -185,6 +185,20 @@ class AppState:
     has_next_page: bool = False
     viewing_diff: bool = False
     diff_lines: list = field(default_factory=list)
+    nav_stack: list = field(default_factory=list)
+
+
+@dataclass
+class ViewSnapshot:
+    mode: str
+    kind: str
+    cursor: int
+    scroll_offset: int
+    detail_scroll: int
+    detail_item: dict
+    detail_lines: list
+    viewing_diff: bool
+    diff_lines: list
 
 
 # --- Helpers ---
@@ -374,10 +388,11 @@ def draw_styled_line(win, row, col, segments, max_w):
 
 _RE_BOLD = re.compile(r'\*\*(.+?)\*\*')
 _RE_CODE = re.compile(r'`([^`]+)`')
+_RE_REFERENCE = re.compile(r'(?<![\w#])#\d+\b')
 
 
 def _parse_inline_md(text):
-    """Parse **bold** and `code` into styled segments."""
+    """Parse bold, code, and issue/PR references into styled segments."""
     segments = []
     # Merge both patterns, process left-to-right
     tokens = []
@@ -385,6 +400,9 @@ def _parse_inline_md(text):
         tokens.append((m.start(), m.end(), m.group(1), curses.A_BOLD))
     for m in _RE_CODE.finditer(text):
         tokens.append((m.start(), m.end(), m.group(1), curses.color_pair(C_CODE)))
+    for m in _RE_REFERENCE.finditer(text):
+        tokens.append((m.start(), m.end(), m.group(0),
+                       curses.color_pair(C_DIFF_HUNK) | curses.A_BOLD | curses.A_UNDERLINE))
     tokens.sort(key=lambda t: t[0])
 
     # Remove overlapping
@@ -460,7 +478,7 @@ def build_detail_lines(item, width, kind):
     # Title
     title = f"#{item.get('number', '')}  {item.get('title', '')}"
     for wrapped in (textwrap.wrap(title, w) or [title]):
-        lines.append([(wrapped, curses.A_BOLD)])
+        lines.append([(text, attr | curses.A_BOLD) for text, attr in _parse_inline_md(wrapped)])
 
     lines.append([("", 0)])
 
@@ -552,7 +570,10 @@ def _parse_md_block(text, width):
         hm = re.match(r'^(#{1,3})\s+(.+)$', line)
         if hm:
             for wrapped in (textwrap.wrap(hm.group(2), width) or [hm.group(2)]):
-                lines_out.append([(wrapped, curses.A_BOLD | curses.A_UNDERLINE)])
+                lines_out.append([
+                    (text, attr | curses.A_BOLD | curses.A_UNDERLINE)
+                    for text, attr in _parse_inline_md(wrapped)
+                ])
             i += 1
             continue
 
@@ -665,8 +686,12 @@ def draw_list_view(stdscr, state, repo):
         safe_addstr(stdscr, row, x, num.rjust(num_col - 1), (attr if is_sel else curses.color_pair(nc)) | curses.A_BOLD)
         x += num_col
 
-        # Title
-        safe_addstr(stdscr, row, x, item.get("title", "")[:title_col], attr)
+        # Title (references remain visible in list rows as well as detail text)
+        title = item.get("title", "")[:title_col]
+        if is_sel:
+            safe_addstr(stdscr, row, x, title, attr)
+        else:
+            draw_styled_line(stdscr, row, x, _parse_inline_md(title), x + title_col + 1)
         x += title_col + 1
 
         # Author
@@ -755,16 +780,18 @@ def draw_detail_view(stdscr, state, repo):
 
     # Help
     if has_draft:
-        ht = " j/k:scroll  y:post  e:edit  n:discard  B:browser  q:back"
+        ht = " j/k:scroll  #:goto  y:post  e:edit  n:discard  B:browser  q:back"
     elif state.viewing_diff:
-        ht = " j/k:scroll  v:back to detail  B:browser  q:back"
+        ht = " j/k:scroll  #:goto  v:back to detail  B:browser  q:back"
     elif state.kind == "pr":
-        ht = " j/k:scroll  c:comment  v:diff  m:merge  O:reopen  C:close  B:browser  r:refresh  q:back"
+        ht = " j/k:scroll  #:goto  c:comment  v:diff  m:merge  O:reopen  C:close  B:browser  r:refresh  q:back"
     else:
-        ht = " j/k:scroll  c:comment  O:reopen  C:close  B:browser  r:refresh  q:back"
+        ht = " j/k:scroll  #:goto  c:comment  O:reopen  C:close  B:browser  r:refresh  q:back"
     safe_addstr(stdscr, h - 1, 0, ht.ljust(w)[:w], curses.color_pair(C_HELP))
 
-    if state.status_msg and not has_draft:
+    if state.mode == "goto_detail":
+        safe_addstr(stdscr, h - 2, 0, f" #{state.goto_buf}█".ljust(w)[:w], curses.A_BOLD)
+    elif state.status_msg and not has_draft:
         safe_addstr(stdscr, h - 2, 0, f" {state.status_msg}"[:w], curses.A_DIM)
 
     stdscr.refresh()
@@ -828,7 +855,7 @@ def fetch_detail(gh, state, number, force=False):
             state.mode = "detail"
             state.viewing_diff = False
             state.diff_lines = []
-            return
+            return True
     try:
         full = gh.view_issue(number) if state.kind == "issue" else gh.view_pr(number)
         save_cache(cp, full)
@@ -838,8 +865,10 @@ def fetch_detail(gh, state, number, force=False):
         state.mode = "detail"
         state.viewing_diff = False
         state.diff_lines = []
+        return True
     except RuntimeError as e:
         state.status_msg = f"Error: {e}"[:80]
+        return False
 
 
 def fetch_diff(gh, state, number, width, force=False):
@@ -866,20 +895,47 @@ def open_detail(gh, state):
         fetch_detail(gh, state, state.items[state.cursor].get("number"))
 
 
-def goto_number(gh, state, number):
-    for i, item in enumerate(state.items):
-        if item.get("number") == number:
-            state.cursor = i
+def _snapshot_view(state, mode):
+    return ViewSnapshot(
+        mode=mode, kind=state.kind, cursor=state.cursor,
+        scroll_offset=state.scroll_offset, detail_scroll=state.detail_scroll,
+        detail_item=state.detail_item, detail_lines=state.detail_lines,
+        viewing_diff=state.viewing_diff, diff_lines=state.diff_lines,
+    )
+
+
+def _restore_view(state):
+    if not state.nav_stack:
+        return False
+    snap = state.nav_stack.pop()
+    state.mode = snap.mode
+    state.kind = snap.kind
+    state.cursor = snap.cursor
+    state.scroll_offset = snap.scroll_offset
+    state.detail_scroll = snap.detail_scroll
+    state.detail_item = snap.detail_item
+    state.detail_lines = snap.detail_lines
+    state.viewing_diff = snap.viewing_diff
+    state.diff_lines = snap.diff_lines
+    state.status_msg = ""
+    return True
+
+
+def goto_number(gh, state, number, origin_mode):
+    """Open a reference, remembering the exact view the jump came from."""
+    snapshot = _snapshot_view(state, origin_mode)
+    original_kind = state.kind
+    for kind in (original_kind, "pr" if original_kind == "issue" else "issue"):
+        state.kind = kind
+        if fetch_detail(gh, state, number):
+            state.nav_stack.append(snapshot)
             state.status_msg = ""
-            return
-    fetch_detail(gh, state, number)
-    if state.mode != "detail":
-        orig = state.kind
-        state.kind = "pr" if orig == "issue" else "issue"
-        fetch_detail(gh, state, number)
-        if state.mode != "detail":
-            state.kind = orig
-            state.status_msg = f"#{number} not found"
+            return True
+
+    state.kind = original_kind
+    state.mode = origin_mode
+    state.status_msg = f"#{number} not found"
+    return False
 
 
 # --- Comment workflow ---
@@ -1028,7 +1084,7 @@ def main_loop(stdscr, repo):
 
         if state.mode in ("list", "search", "goto"):
             draw_list_view(stdscr, state, repo)
-        elif state.mode == "detail":
+        elif state.mode in ("detail", "goto_detail"):
             if not state.detail_lines and state.detail_item:
                 state.detail_lines = build_detail_lines(state.detail_item, w, state.kind)
             draw_detail_view(stdscr, state, repo)
@@ -1062,16 +1118,17 @@ def main_loop(stdscr, repo):
             continue
 
         # --- Goto ---
-        if state.mode == "goto":
+        if state.mode in ("goto", "goto_detail"):
+            origin_mode = "detail" if state.mode == "goto_detail" else "list"
             if key == 27:
-                state.mode = "list"
+                state.mode = origin_mode
                 state.goto_buf = ""
             elif key in (curses.KEY_ENTER, 10, 13):
                 if state.goto_buf.isdigit():
-                    goto_number(gh, state, int(state.goto_buf))
+                    goto_number(gh, state, int(state.goto_buf), origin_mode)
                 state.goto_buf = ""
-                if state.mode == "goto":
-                    state.mode = "list"
+                if state.mode in ("goto", "goto_detail"):
+                    state.mode = origin_mode
             elif key in (curses.KEY_BACKSPACE, 127, 8):
                 state.goto_buf = state.goto_buf[:-1]
             elif ord("0") <= key <= ord("9"):
@@ -1081,7 +1138,8 @@ def main_loop(stdscr, repo):
         # --- List ---
         if state.mode == "list":
             if key in (ord("q"), ord("Q")):
-                break
+                if not _restore_view(state):
+                    break
             elif key in (ord("j"), curses.KEY_DOWN):
                 if state.cursor < len(state.items) - 1:
                     state.cursor += 1
@@ -1174,12 +1232,18 @@ def main_loop(stdscr, repo):
                 elif key == ord("B"):
                     if state.detail_item:
                         gh.open_in_browser(state.kind, state.detail_item.get("number"))
+                elif key == ord("#"):
+                    state.mode = "goto_detail"
+                    state.goto_buf = ""
                 else:
                     _detail_scroll_keys(key, state, h, banner_h)
             elif state.viewing_diff:
                 if key in (ord("q"), ord("Q"), ord("v")):
                     state.viewing_diff = False
                     state.detail_scroll = 0
+                elif key == ord("#"):
+                    state.mode = "goto_detail"
+                    state.goto_buf = ""
                 elif key == ord("B"):
                     if state.detail_item:
                         gh.open_in_browser(state.kind, state.detail_item.get("number"))
@@ -1187,8 +1251,12 @@ def main_loop(stdscr, repo):
                     _detail_scroll_keys(key, state, h)
             else:
                 if key in (ord("q"), ord("Q")):
-                    state.mode = "list"
-                    state.detail_lines = []
+                    if not _restore_view(state):
+                        state.mode = "list"
+                        state.detail_lines = []
+                elif key == ord("#"):
+                    state.mode = "goto_detail"
+                    state.goto_buf = ""
                 elif key == ord("c"):
                     stdscr = start_comment(stdscr, state)
                 elif key == ord("v") and state.kind == "pr" and state.detail_item:
